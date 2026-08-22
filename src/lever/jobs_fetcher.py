@@ -7,12 +7,15 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = (
+    Path(__file__).resolve().parent.parent.parent
+)
 
 DEFAULT_INPUT = (
     REPO_ROOT
     / "data"
-    / "raw"
+    / "processed"
+    / "lever"
     / "company_tokens.json"
 )
 
@@ -20,12 +23,12 @@ DEFAULT_OUTPUT = (
     REPO_ROOT
     / "data"
     / "raw"
-    / "greenhouse"
+    / "lever"
     / "jobs.json"
 )
 
 API_URL = (
-    "https://boards-api.greenhouse.io/v1/boards"
+    "https://api.lever.co/v0/postings"
 )
 
 session = requests.Session()
@@ -42,8 +45,6 @@ session.headers.update(
 
 
 def current_time() -> str:
-    """Return the current UTC time as ISO 8601."""
-
     return datetime.now(
         timezone.utc
     ).isoformat()
@@ -52,11 +53,6 @@ def current_time() -> str:
 def html_to_text(
     html: str | None,
 ) -> str:
-    """
-    Convert HTML job description into
-    readable plain text.
-    """
-
     if not html:
         return ""
 
@@ -74,10 +70,6 @@ def html_to_text(
 def load_tokens(
     path: Path,
 ) -> dict:
-    """
-    Load company_tokens.json.
-    """
-
     if not path.exists():
         raise FileNotFoundError(
             f"Token file does not exist: {path}"
@@ -97,14 +89,9 @@ def load_tokens(
 
     return data
 
-
 def load_existing_jobs(
     path: Path,
 ) -> list[dict]:
-    """
-    Load existing jobs so repeated scraper
-    runs don't erase previously collected data.
-    """
 
     if not path.exists():
         return []
@@ -132,25 +119,18 @@ def load_existing_jobs(
 
     return data
 
-
 def fetch_board(
     token: str,
 ) -> requests.Response:
-    """
-    Fetch all published jobs for one
-    Greenhouse board.
-    """
-
-    url = f"{API_URL}/{token}/jobs"
+    url = f"{API_URL}/{token}"
 
     return session.get(
         url,
         params={
-            "content": "true",
+            "mode": "json",
         },
         timeout=30,
     )
-
 
 def normalize_job(
     job: dict,
@@ -158,25 +138,52 @@ def normalize_job(
     token_data: dict,
 ) -> dict:
     """
-    Convert a Greenhouse API job into the
+    Convert a Lever public posting into the
     normalized structure used by our dataset.
     """
 
-    description_html = job.get(
-        "content"
+    categories = (
+        job.get("categories")
+        or {}
     )
 
-    description_text = html_to_text(
-        description_html
+    description_html = (
+        job.get("description")
+        or ""
     )
 
-    location = (
-        job.get("location")
+    description_text = (
+        job.get("descriptionPlain")
+        or html_to_text(
+            description_html
+        )
+    )
+
+    location = categories.get(
+        "location"
+    )
+
+    all_locations = categories.get(
+        "allLocations",
+        [],
+    )
+
+    if all_locations:
+        location_name = ", ".join(
+            str(location)
+            for location in all_locations
+            if location
+        )
+    else:
+        location_name = location
+
+    urls = (
+        job.get("urls")
         or {}
     )
 
     return {
-        "source": "greenhouse",
+        "source": "lever",
 
         "board_token": token,
 
@@ -189,18 +196,14 @@ def normalize_job(
             "id"
         ),
 
-        "internal_job_id": job.get(
-            "internal_job_id"
-        ),
+        "internal_job_id": None,
 
         "title": job.get(
-            "title"
+            "text"
         ),
 
         "location": {
-            "name": location.get(
-                "name"
-            )
+            "name": location_name
         },
 
         "description_html": (
@@ -211,28 +214,67 @@ def normalize_job(
             description_text
         ),
 
-        "job_url": job.get(
-            "absolute_url"
+        "job_url": (
+            urls.get("show")
+            or job.get("hostedUrl")
         ),
 
-        "updated_at": job.get(
-            "updated_at"
+        "updated_at": (
+            datetime.fromtimestamp(
+                job["updatedAt"] / 1000,
+                timezone.utc,
+            ).isoformat()
+            if job.get("updatedAt")
+            else None
         ),
 
-        "departments": job.get(
-            "departments",
-            [],
+        "departments": (
+            [
+                {
+                    "name": categories.get(
+                        "department"
+                    )
+                }
+            ]
+            if categories.get(
+                "department"
+            )
+            else []
         ),
 
-        "offices": job.get(
-            "offices",
-            [],
-        ),
+        "offices": [],
 
-        "metadata": job.get(
-            "metadata",
-            [],
-        ),
+        "metadata": {
+            "team": categories.get(
+                "team"
+            ),
+            "commitment": categories.get(
+                "commitment"
+            ),
+            "level": categories.get(
+                "level"
+            ),
+            "workplace_type": job.get(
+                "workplaceType"
+            ),
+            "state": job.get(
+                "state"
+            ),
+            "tags": job.get(
+                "tags",
+                [],
+            ),
+            "salary_description": job.get(
+                "salaryDescription"
+            ),
+            "salary_range": job.get(
+                "salaryRange"
+            ),
+            "requisition_codes": job.get(
+                "requisitionCodes",
+                [],
+            ),
+        },
 
         "discovery": {
             "queries_found_in": token_data.get(
@@ -249,19 +291,18 @@ def normalize_job(
         "scraped_at": current_time(),
     }
 
-
 def scrape(
     tokens: dict,
     existing_jobs: list[dict],
     delay: float,
 ) -> list[dict]:
     """
-    Scrape every Greenhouse board and return
-    the complete deduplicated job list.
+    Fetch every Lever board and return the
+    complete deduplicated job list.
     """
 
     jobs_by_key: dict[
-        tuple[str, int],
+        tuple[str, str],
         dict,
     ] = {}
 
@@ -280,7 +321,7 @@ def scrape(
 
         key = (
             token,
-            job_id,
+            str(job_id),
         )
 
         jobs_by_key[key] = job
@@ -288,7 +329,7 @@ def scrape(
     total_tokens = len(tokens)
 
     print(
-        f"[*] Boards to scrape: {total_tokens}"
+        f"[*] Boards to fetch: {total_tokens}"
     )
 
     print(
@@ -348,7 +389,7 @@ def scrape(
                     )
 
                 print(
-                    "    Stopping scraper."
+                    "    Stopping fetcher."
                 )
 
                 break
@@ -357,10 +398,16 @@ def scrape(
 
             data = response.json()
 
-            jobs = data.get(
-                "jobs",
-                [],
-            )
+            # Lever's public v0 postings endpoint
+            # returns the postings as a JSON array.
+            if not isinstance(data, list):
+                print(
+                    "    [!] Unexpected response "
+                    "format: expected a list."
+                )
+                continue
+
+            jobs = data
 
             print(
                 f"    Jobs found: "
@@ -378,7 +425,7 @@ def scrape(
 
                 key = (
                     token,
-                    job_id,
+                    str(job_id),
                 )
 
                 normalized = normalize_job(
@@ -399,7 +446,7 @@ def scrape(
         except json.JSONDecodeError:
 
             print(
-                "    [!] Greenhouse returned "
+                "    [!] Lever returned "
                 "invalid JSON."
             )
 
@@ -415,6 +462,7 @@ def scrape(
     return list(
         jobs_by_key.values()
     )
+
 
 def save_jobs(
     jobs: list[dict],
@@ -465,10 +513,11 @@ def save_jobs(
         f"[+] Output: {path}"
     )
 
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Scrape Greenhouse jobs using "
+            "Fetch Lever jobs using "
             "company board tokens."
         )
     )
@@ -479,7 +528,9 @@ def main():
         default=None,
         help=(
             "Path to company_tokens.json "
-            "(default: data/raw/company_tokens.json)"
+            "(default: "
+            "data/processed/lever/"
+            "company_tokens.json)"
         ),
     )
 
@@ -489,7 +540,8 @@ def main():
         default=None,
         help=(
             "Path to jobs.json "
-            "(default: data/raw/greenhouse/jobs.json)"
+            "(default: "
+            "data/raw/lever/jobs.json)"
         ),
     )
 
@@ -518,7 +570,7 @@ def main():
     )
 
     print(
-        f"[*] Loading tokens from:"
+        "[*] Loading tokens from:"
     )
 
     print(
@@ -531,7 +583,7 @@ def main():
 
     print(
         f"[*] Found {len(tokens)} "
-        f"Greenhouse boards"
+        f"Lever boards"
     )
 
     existing_jobs = load_existing_jobs(

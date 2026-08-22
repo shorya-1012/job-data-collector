@@ -22,26 +22,18 @@ SEARCH_TERMS = [
     "Design",
 ]
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 OUTPUT_PATH = (
     REPO_ROOT
     / "data"
     / "processed"
-    / "greenhouse"
+    / "lever"
     / "company_tokens.json"
 )
-# OUTPUT_PATH = (
-#     REPO_ROOT
-#     / "data"
-#     / "raw"
-#     / "company_tokens.json"
-# )
 
 ENV_PATH = REPO_ROOT / ".env"
-
 load_dotenv(ENV_PATH)
-
 
 TOKEN_RE = re.compile(
     r"^/([A-Za-z0-9._-]+)/",
@@ -49,23 +41,17 @@ TOKEN_RE = re.compile(
 )
 
 TOKEN_BLOCKLIST = {
+    "jobs",
     "embed",
-    "job_board",
-    "boards",
-    "job_app",
-    "trueup",
 }
 
-
 def build_query(term: str) -> str:
-    return f'site:boards.greenhouse.io "{term}"'
-
+    return f'site:jobs.lever.co "{term}"'
 
 def extract_token(url: str) -> str | None:
     try:
         parsed = urlparse(url)
-
-        if parsed.netloc.lower() != "boards.greenhouse.io":
+        if parsed.netloc.lower() != "jobs.lever.co":
             return None
 
         match = TOKEN_RE.match(parsed.path)
@@ -74,15 +60,12 @@ def extract_token(url: str) -> str | None:
             return None
 
         token = match.group(1).lower()
-
         if token in TOKEN_BLOCKLIST:
             return None
 
         return token
-
     except Exception:
         return None
-
 
 def search(
     client: serpapi.Client,
@@ -252,7 +235,7 @@ def save_results(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Find Greenhouse company tokens "
+            "Find Lever company tokens "
             "using SerpApi."
         )
     )
